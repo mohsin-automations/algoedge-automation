@@ -3,31 +3,38 @@ import requests
 import json
 import sys
 
-PAGE_ID = os.environ.get("META_PAGE_ID", "61596362423755")
+INPUT_PAGE_ID = os.environ.get("META_PAGE_ID", "").strip()
 INPUT_TOKEN = os.environ.get("META_PAGE_ACCESS_TOKEN", "").strip()
 
-def get_page_access_token(token, target_page_id):
-    print("[*] Checking access token type and resolving Page permissions...")
+def resolve_page_credentials(token, target_id):
+    print("[*] Resolving true Graph API Page ID and Access Token...")
     url = f"https://graph.facebook.com/v21.0/me/accounts?access_token={token}"
     try:
         res = requests.get(url)
         data = res.json()
         if "data" in data and len(data["data"]) > 0:
             for page in data["data"]:
-                if str(page.get("id")) == str(target_page_id):
-                    print(f"[+] Successfully extracted Page Access Token for '{page.get('name')}' ({target_page_id})!")
-                    return page.get("access_token")
+                if "algoedge" in page.get("name", "").lower():
+                    true_id = str(page.get("id"))
+                    page_token = page.get("access_token")
+                    print(f"[+] Found AlgoEdge Systems! True Page ID: {true_id}")
+                    return true_id, page_token
+            for page in data["data"]:
+                if str(page.get("id")) == str(target_id):
+                    return str(page.get("id")), page.get("access_token")
             first_page = data["data"][0]
-            print(f"[+] Using Page Access Token for '{first_page.get('name')}' ({first_page.get('id')})")
-            return first_page.get("access_token")
+            true_id = str(first_page.get("id"))
+            page_token = first_page.get("access_token")
+            print(f"[+] Using Page '{first_page.get('name')}' with true Page ID: {true_id}")
+            return true_id, page_token
     except Exception as e:
-        print(f"[*] Note: Could not query /me/accounts ({e}), proceeding with provided token.")
+        print(f"[*] Note: Could not query /me/accounts ({e})")
     
-    return token
+    return target_id, token
 
-def publish_video_direct(video_path, caption, page_token):
-    print("[*] Attempting direct video upload via graph-video.facebook.com/videos...")
-    upload_url = f"https://graph-video.facebook.com/v21.0/{PAGE_ID}/videos"
+def publish_video_direct(page_id, page_token, video_path, caption):
+    print(f"[*] Publishing video directly to https://graph-video.facebook.com/v21.0/{page_id}/videos...")
+    upload_url = f"https://graph-video.facebook.com/v21.0/{page_id}/videos"
     
     with open(video_path, "rb") as f:
         files = {
@@ -41,7 +48,7 @@ def publish_video_direct(video_path, caption, page_token):
         res_data = res.json()
         
     if "id" in res_data:
-        print(f"[SUCCESS] Video published successfully to Facebook Page! Video ID: {res_data['id']}")
+        print(f"[SUCCESS] Video successfully published as a Reel to Facebook Page! Video ID: {res_data['id']}")
         return True
     else:
         print(f"Direct video upload failed: {res_data}")
@@ -52,10 +59,10 @@ def publish_facebook_reel(video_path, caption):
         print("ERROR: META_PAGE_ACCESS_TOKEN environment variable is not set.")
         sys.exit(1)
 
-    page_token = get_page_access_token(INPUT_TOKEN, PAGE_ID)
+    true_page_id, page_token = resolve_page_credentials(INPUT_TOKEN, INPUT_PAGE_ID)
 
-    print(f"[*] Initializing Reel upload session for Page: {PAGE_ID}...")
-    init_url = f"https://graph.facebook.com/v21.0/{PAGE_ID}/video_reels"
+    print(f"[*] Initializing Reel upload session for Page: {true_page_id}...")
+    init_url = f"https://graph.facebook.com/v21.0/{true_page_id}/video_reels"
     init_payload = {
         "upload_phase": "start",
         "access_token": page_token
@@ -65,9 +72,9 @@ def publish_facebook_reel(video_path, caption):
     data = res.json()
     
     if "video_id" not in data:
-        print(f"Reel API start session returned: {data}")
-        print("[*] Switching to Universal Direct Video Upload...")
-        success = publish_video_direct(video_path, caption, page_token)
+        print(f"Reel API response: {data}")
+        print("[*] Falling back to direct video publishing endpoint...")
+        success = publish_video_direct(true_page_id, page_token, video_path, caption)
         if not success:
             sys.exit(1)
         return
@@ -103,8 +110,10 @@ def publish_facebook_reel(video_path, caption):
         print(f"[SUCCESS] Reel published successfully to Facebook Page! Video ID: {video_id}")
     else:
         print(f"Finish response: {finish_data}")
-        print("[*] Attempting universal direct upload fallback...")
-        publish_video_direct(video_path, caption, page_token)
+        print("[*] Attempting direct upload fallback...")
+        success = publish_video_direct(true_page_id, page_token, video_path, caption)
+        if not success:
+            sys.exit(1)
 
 if __name__ == "__main__":
     video = "algoedge_fvg_reel.mp4"
