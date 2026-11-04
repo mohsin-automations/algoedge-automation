@@ -4,35 +4,82 @@ import json
 import sys
 
 PAGE_ID = os.environ.get("META_PAGE_ID", "61596362423755")
-ACCESS_TOKEN = os.environ.get("META_PAGE_ACCESS_TOKEN")
+INPUT_TOKEN = os.environ.get("META_PAGE_ACCESS_TOKEN", "").strip()
+
+def get_page_access_token(token, target_page_id):
+    print("[*] Checking access token type and resolving Page permissions...")
+    url = f"https://graph.facebook.com/v21.0/me/accounts?access_token={token}"
+    try:
+        res = requests.get(url)
+        data = res.json()
+        if "data" in data and len(data["data"]) > 0:
+            for page in data["data"]:
+                if str(page.get("id")) == str(target_page_id):
+                    print(f"[+] Successfully extracted Page Access Token for '{page.get('name')}' ({target_page_id})!")
+                    return page.get("access_token")
+            first_page = data["data"][0]
+            print(f"[+] Using Page Access Token for '{first_page.get('name')}' ({first_page.get('id')})")
+            return first_page.get("access_token")
+    except Exception as e:
+        print(f"[*] Note: Could not query /me/accounts ({e}), proceeding with provided token.")
+    
+    return token
+
+def publish_video_direct(video_path, caption, page_token):
+    print("[*] Attempting direct video upload via graph-video.facebook.com/videos...")
+    upload_url = f"https://graph-video.facebook.com/v21.0/{PAGE_ID}/videos"
+    
+    with open(video_path, "rb") as f:
+        files = {
+            "source": f
+        }
+        data = {
+            "description": caption,
+            "access_token": page_token
+        }
+        res = requests.post(upload_url, data=data, files=files)
+        res_data = res.json()
+        
+    if "id" in res_data:
+        print(f"[SUCCESS] Video published successfully to Facebook Page! Video ID: {res_data['id']}")
+        return True
+    else:
+        print(f"Direct video upload failed: {res_data}")
+        return False
 
 def publish_facebook_reel(video_path, caption):
-    if not ACCESS_TOKEN:
+    if not INPUT_TOKEN:
         print("ERROR: META_PAGE_ACCESS_TOKEN environment variable is not set.")
         sys.exit(1)
+
+    page_token = get_page_access_token(INPUT_TOKEN, PAGE_ID)
 
     print(f"[*] Initializing Reel upload session for Page: {PAGE_ID}...")
     init_url = f"https://graph.facebook.com/v21.0/{PAGE_ID}/video_reels"
     init_payload = {
         "upload_phase": "start",
-        "access_token": ACCESS_TOKEN
+        "access_token": page_token
     }
     
     res = requests.post(init_url, data=init_payload)
     data = res.json()
+    
     if "video_id" not in data:
-        print(f"Failed to start upload session: {data}")
-        sys.exit(1)
+        print(f"Reel API start session returned: {data}")
+        print("[*] Switching to Universal Direct Video Upload...")
+        success = publish_video_direct(video_path, caption, page_token)
+        if not success:
+            sys.exit(1)
+        return
         
     video_id = data["video_id"]
     upload_url = data["upload_url"]
-    print(f"[+] Upload session started. Video ID: {video_id}")
+    print(f"[+] Reel upload session started. Video ID: {video_id}")
     
-    # Upload binary file
     print(f"[*] Uploading binary payload: {video_path}...")
     file_size = os.path.getsize(video_path)
     headers = {
-        "Authorization": f"OAuth {ACCESS_TOKEN}",
+        "Authorization": f"OAuth {page_token}",
         "offset": "0",
         "file_size": str(file_size)
     }
@@ -41,11 +88,10 @@ def publish_facebook_reel(video_path, caption):
         
     print(f"[+] Upload chunk completed. Response: {upload_res.status_code}")
     
-    # Finish and publish
     print("[*] Finalizing and publishing Reel...")
     finish_payload = {
         "upload_phase": "finish",
-        "access_token": ACCESS_TOKEN,
+        "access_token": page_token,
         "video_id": video_id,
         "video_state": "PUBLISHED",
         "description": caption
@@ -57,6 +103,8 @@ def publish_facebook_reel(video_path, caption):
         print(f"[SUCCESS] Reel published successfully to Facebook Page! Video ID: {video_id}")
     else:
         print(f"Finish response: {finish_data}")
+        print("[*] Attempting universal direct upload fallback...")
+        publish_video_direct(video_path, caption, page_token)
 
 if __name__ == "__main__":
     video = "algoedge_fvg_reel.mp4"
