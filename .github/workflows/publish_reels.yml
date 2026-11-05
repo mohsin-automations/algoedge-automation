@@ -2,8 +2,23 @@ name: AlgoEdge Systems Daily Publisher
 
 on:
   schedule:
+    # 09:30 AM PKT (04:30 UTC) -> Morning Reel
     - cron: '30 4 * * *'
+    # 02:00 PM PKT (09:00 UTC) -> Strategy Blueprint Infographic
+    - cron: '0 9 * * *'
+    # 06:30 PM PKT (13:30 UTC) -> Trader Open Floor Discussion Post
+    - cron: '30 13 * * *'
+    # 09:00 PM PKT (16:00 UTC) -> System Diagnostics & Code Audit Card
+    - cron: '0 16 * * *'
   workflow_dispatch:
+    inputs:
+      post_mode:
+        description: 'Content type to publish (reel, blueprint, discussion, diagnostics, or auto)'
+        required: false
+        default: 'auto'
+
+permissions:
+  contents: write
 
 jobs:
   render-and-publish:
@@ -25,15 +40,23 @@ jobs:
 
       - name: Install Python Dependencies
         run: |
-          pip install opencv-python-headless numpy requests
+          pip install opencv-python-headless numpy requests google-api-python-client google-auth google-auth-oauthlib
 
-      - name: Autonomously Render Daily Trading Reel
-        run: |
-          python render_algo_reel.py
-
-      - name: Publish Reel to Meta
+      - name: Render, Sync Staged Drive Updates & Publish to Meta
         env:
+          POST_MODE: ${{ github.event.inputs.post_mode }}
           META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
           META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
+          GCP_CLIENT_ID: ${{ secrets.GCP_CLIENT_ID }}
+          GCP_CLIENT_SECRET: ${{ secrets.GCP_CLIENT_SECRET }}
+          DRIVE_REFRESH_TOKEN: ${{ secrets.DRIVE_REFRESH_TOKEN }}
         run: |
+          python render_algo_reel.py
           python publish_to_meta.py
+
+      - name: Auto-Commit Any Drive-Synced Code Updates to Repo
+        run: |
+          git config user.name "AlgoEdge Auto-Sync Bot"
+          git config user.email "actions@github.com"
+          git add render_algo_reel.py publish_to_meta.py .github/workflows/publish_reels.yml
+          git diff --staged --quiet || (git commit -m "Auto-sync updated scripts from Google Drive" && git push)
