@@ -6,32 +6,6 @@ import sys
 import json
 import datetime
 
-def get_active_mode():
-    """
-    Determines which of the 4 daily content pillars to generate based on:
-    1. Command line arg or POST_MODE env var ('reel', 'blueprint', 'discussion', 'diagnostics')
-    2. Current UTC hour:
-       - 03:00 to 07:59 UTC (08:00 AM - 12:59 PM PKT) -> 'reel' (09:30 AM PKT slot)
-       - 08:00 to 11:59 UTC (01:00 PM - 04:59 PM PKT) -> 'blueprint' (02:00 PM PKT slot)
-       - 12:00 to 14:59 UTC (05:00 PM - 07:59 PM PKT) -> 'discussion' (06:30 PM PKT slot)
-       - 15:00 to 02:59 UTC (08:00 PM - 07:59 AM PKT) -> 'diagnostics' (09:00 PM PKT slot)
-    """
-    env_mode = os.environ.get("POST_MODE", "").strip().lower()
-    if len(sys.argv) > 1 and sys.argv[1].lower() in ["reel", "blueprint", "discussion", "diagnostics"]:
-        return sys.argv[1].lower()
-    if env_mode in ["reel", "blueprint", "discussion", "diagnostics"]:
-        return env_mode
-
-    utc_hour = datetime.datetime.utcnow().hour
-    if 3 <= utc_hour < 8:
-        return "reel"
-    elif 8 <= utc_hour < 12:
-        return "blueprint"
-    elif 12 <= utc_hour < 15:
-        return "discussion"
-    else:
-        return "diagnostics"
-
 
 def get_next_rotation_index(category_key: str, total_items: int) -> int:
     """
@@ -63,6 +37,102 @@ def get_next_rotation_index(category_key: str, total_items: int) -> int:
     return current_idx % total_items
 
 
+def get_active_mode():
+    """
+    Determines which of the 4 daily content pillars to generate:
+    - Explicit arg or POST_MODE env var ('reel', 'blueprint', 'discussion', 'diagnostics', 'lead_magnet')
+    - Scheduled UTC windows:
+      * 03:00-06:59 UTC -> 'reel' (09:30 AM PKT)
+      * 08:00-10:59 UTC -> 'blueprint' (02:00 PM PKT)
+      * 12:00-14:59 UTC -> 'discussion' (06:30 PM PKT)
+      * 15:00-17:59 UTC -> 'diagnostics' (09:00 PM PKT)
+    - Any manual or off-window run rotates cleanly across all 4 pillars so consecutive runs never repeat.
+    """
+    valid_modes = ["reel", "blueprint", "discussion", "diagnostics", "lead_magnet"]
+    env_mode = os.environ.get("POST_MODE", "").strip().lower()
+    if len(sys.argv) > 1 and sys.argv[1].lower() in valid_modes:
+        return sys.argv[1].lower()
+    if env_mode in valid_modes:
+        return env_mode
+
+    utc_hour = datetime.datetime.utcnow().hour
+    if 3 <= utc_hour < 7:
+        return "reel"
+    elif 8 <= utc_hour < 11:
+        return "blueprint"
+    elif 12 <= utc_hour < 15:
+        return "discussion"
+    elif 15 <= utc_hour < 18:
+        return "diagnostics"
+    else:
+        pillars = ["reel", "blueprint", "discussion", "diagnostics"]
+        return pillars[get_next_rotation_index("auto_pillar", len(pillars))]
+
+
+def generate_lead_magnet_card(output_png="algoedge_post.png", caption_file="post_caption.txt"):
+    """
+    Generates a high-contrast 1080x1080 Lead Magnet graphic for the Pinned Post
+    offering the Free MT5 Prop Firm Drawdown Guard & Lot Calculator (.ex5).
+    """
+    width, height = 1080, 1080
+    img = np.full((height, width, 3), (24, 16, 12), dtype=np.uint8)
+
+    for y in range(0, height, 60):
+        cv2.line(img, (0, y), (width, y), (36, 26, 20), 1)
+    for x in range(0, width, 60):
+        cv2.line(img, (x, 0), (x, height), (36, 26, 20), 1)
+
+    gold = (55, 205, 255)
+    cyan = (255, 220, 40)
+    green = (95, 225, 110)
+
+    cv2.rectangle(img, (45, 45), (1035, 1035), gold, 3)
+    cv2.rectangle(img, (65, 65), (1015, 235), (36, 26, 20), -1)
+    cv2.rectangle(img, (65, 65), (1015, 235), gold, 2)
+
+    cv2.putText(img, "FREE MT5 UTILITY // ALGOEDGE SYSTEMS", (95, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.78, gold, 2, cv2.LINE_AA)
+    cv2.putText(img, "PROP FIRM DRAWDOWN GUARD", (95, 175), cv2.FONT_HERSHEY_DUPLEX, 1.32, (255, 255, 255), 3, cv2.LINE_AA)
+    cv2.putText(img, "& DYNAMIC LOT CALCULATOR (.EX5)", (95, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.85, cyan, 2, cv2.LINE_AA)
+
+    features = [
+        ("1. EXACT RISK LOT SIZING", "Auto-sizes every XAUUSD, US30 & FX order to 0.5%-1.0% risk.", cyan),
+        ("2. REAL-TIME EQUITY BREAKER", "Monitors closed + floating PnL on every millisecond tick.", green),
+        ("3. HARD DAILY LOCKOUT", "Auto-closes & locks terminal at 4.0% before 5% prop breach.", gold),
+        ("4. ZERO MARTINGALE / ZERO GRID", "100% compliant with FTMO, FundedNext & The5ers rules.", (220, 140, 255))
+    ]
+    for i, (f_title, f_desc, accent) in enumerate(features):
+        y_top = 265 + i * 145
+        y_bot = y_top + 125
+        cv2.rectangle(img, (65, y_top), (1015, y_bot), (32, 22, 18), -1)
+        cv2.rectangle(img, (65, y_top), (78, y_bot), accent, -1)
+        cv2.putText(img, f_title, (105, y_top + 48), cv2.FONT_HERSHEY_DUPLEX, 0.88, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(img, f_desc, (105, y_top + 95), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (205, 215, 225), 1, cv2.LINE_AA)
+
+    cv2.rectangle(img, (65, 860), (1015, 1005), (30, 38, 22), -1)
+    cv2.rectangle(img, (65, 860), (1015, 1005), green, 2)
+    cv2.putText(img, "HOW TO CLAIM IT FREE:", (95, 912), cv2.FONT_HERSHEY_DUPLEX, 0.92, green, 2, cv2.LINE_AA)
+    cv2.putText(img, "1) Follow AlgoEdge Systems   2) Comment 'GUARD' or 'RISK' below", (95, 968), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 255, 255), 2, cv2.LINE_AA)
+
+    caption = (
+        "FREE MT5 PROP FIRM DRAWDOWN GUARD & LOT CALCULATOR (.EX5)\n\n"
+        "Most traders fail prop firm evaluations (FTMO, FundedNext, The5ers) because of emotional revenge trading or miscalculated lot sizes during high-impact news.\n\n"
+        "We built an automated MQL5 utility that:\n"
+        "- Auto-calculates exact 0.5%-1.0% risk lot sizes from your Stop Loss distance\n"
+        "- Monitors real-time floating + closed daily drawdown on every tick\n"
+        "- Auto-locks terminal execution at your custom cap (e.g., 3.8%-4.0%) before you breach a 5% prop limit\n\n"
+        "How to get it free:\n"
+        "1. Follow the AlgoEdge Systems Page\n"
+        "2. Comment 'GUARD' or 'RISK' below\n\n"
+        "Our desk will reply with the compiled .ex5 file and setup guide.\n\n"
+        "#MQL5 #MetaTrader5 #PropFirm #FTMO #FundedNext #XAUUSD #AlgoTrading"
+    )
+    with open(caption_file, "w", encoding="utf-8") as cf:
+        cf.write(caption)
+
+    cv2.imwrite(output_png, img)
+    print(f"[+] Lead Magnet card rendered: {output_png}")
+
+
 def generate_dynamic_reel(output_mp4="algoedge_fvg_reel.mp4", caption_file="post_caption.txt"):
     width, height = 1080, 1920
     fps = 30
@@ -90,7 +160,7 @@ def generate_dynamic_reel(output_mp4="algoedge_fvg_reel.mp4", caption_file="post
                 "Why manual Gold traders get wicked out before the real drop.\n\n"
                 "During London Open, price sweeps retail buy-stops above Asian highs before creating a bearish Fair Value Gap (FVG). "
                 "Our MQL5 engine waits for the sweep, detects the displacement imbalance, and executes on the exact mitigation tick with a 1.0% hardcoded risk buffer.\n\n"
-                "🎁 FREE MT5 RISK & LOT CALCULATOR (.EX5):\n"
+                "FREE MT5 RISK & LOT CALCULATOR (.EX5):\n"
                 "1. Follow AlgoEdge Systems\n"
                 "2. Comment 'RISK' below\n\n"
                 "Our development desk will reply with the compiled utility and setup walkthrough.\n\n"
@@ -116,7 +186,7 @@ def generate_dynamic_reel(output_mp4="algoedge_fvg_reel.mp4", caption_file="post
             "caption": (
                 "Trading US30 manually at the 09:30 NY Open is where most prop firm accounts breach their daily drawdown.\n\n"
                 "Instead of chasing the initial spike, our US30 Liquidity Engine waits for sell-side liquidity to sweep, confirms a 1-minute Market Structure Shift (MSS), and fires on the Breaker retest.\n\n"
-                "🎁 FREE PROP FIRM EQUITY GUARD SCRIPT (.EX5):\n"
+                "FREE PROP FIRM EQUITY GUARD SCRIPT (.EX5):\n"
                 "1. Follow AlgoEdge Systems\n"
                 "2. Comment 'GUARD' below\n\n"
                 "We will send you the script that auto-locks your MT5 terminal before you ever breach daily drawdown.\n\n"
@@ -263,10 +333,10 @@ def generate_blueprint_infographic(output_png="algoedge_post.png", caption_file=
             "caption": (
                 "Strategy Blueprint: How our MQL5 Liquidity Sweep Engine trades the London Open without human bias.\n\n"
                 "Most retail traders buy the initial breakout above the Asian High—walking right into institutional sell orders. Here is the 4-step mechanical logic our EA executes automatically:\n\n"
-                "1️⃣ Maps the 00:00–08:00 UTC Asian Range High and Low.\n"
-                "2️⃣ Waits for a liquidity sweep above the high followed by rejection.\n"
-                "3️⃣ Verifies a bearish Fair Value Gap (FVG) displacement candle.\n"
-                "4️⃣ Fires a precision Limit entry with hardcoded 1.0% risk and zero martingale.\n\n"
+                "1. Maps the 00:00-08:00 UTC Asian Range High and Low.\n"
+                "2. Waits for a liquidity sweep above the high followed by rejection.\n"
+                "3. Verifies a bearish Fair Value Gap (FVG) displacement candle.\n"
+                "4. Fires a precision Limit entry with hardcoded 1.0% risk and zero martingale.\n\n"
                 "Want this logic running on your MT5 terminal or have your own strategy to automate? Comment 'SWEEP' below or DM our desk.\n\n"
                 "#SmartMoneyConcepts #XAUUSD #ForexPakistan #MQL5 #AlgoTrading #MetaTrader5"
             )
@@ -284,10 +354,10 @@ def generate_blueprint_infographic(output_png="algoedge_post.png", caption_file=
             "caption": (
                 "90% of prop firm evaluations fail because of revenge trading after 2 consecutive losses.\n\n"
                 "You don't need more indicators—you need a mechanical circuit breaker. Here is how our MQL5 Prop Firm Equity Guard protects funded accounts:\n\n"
-                "• Monitors combined closed + floating drawdown on every millisecond tick.\n"
-                "• Automatically liquidates open tickets if drawdown hits your custom cap (e.g., 4.0%).\n"
-                "• Locks terminal order execution until the next server day so you cannot revenge trade.\n\n"
-                "🎁 Comment 'GUARD' below and follow AlgoEdge Systems to get the compiled MT5 Equity Guard utility.\n\n"
+                "- Monitors combined closed + floating drawdown on every millisecond tick.\n"
+                "- Automatically liquidates open tickets if drawdown hits your custom cap (e.g., 4.0%).\n"
+                "- Locks terminal order execution until the next server day so you cannot revenge trade.\n\n"
+                "Comment 'GUARD' below and follow AlgoEdge Systems to get the compiled MT5 Equity Guard utility.\n\n"
                 "#PropFirm #FTMO #FundedNext #ForexTrading #RiskManagement #MQL5"
             )
         },
@@ -348,28 +418,28 @@ def generate_blueprint_infographic(output_png="algoedge_post.png", caption_file=
 def generate_discussion_post(caption_file="post_caption.txt"):
     discussions = [
         (
-            "TRADER OPEN FLOOR 📊\n\n"
+            "TRADER OPEN FLOOR\n\n"
             "If you could automate ONE rule in your trading playbook today so you never break it again, which one would save your equity curve the most?\n\n"
             "A) Hard Daily Drawdown Lockout (Auto-shutoff at -3% daily loss)\n"
             "B) Instant FVG / Liquidity Sweep Execution (Zero entry hesitation)\n"
             "C) Dynamic Structure-Based Trailing Stop & Partial Take-Profit\n\n"
-            "Drop A, B, or C in the comments below 👇 — we'll share how we code that exact module in MQL5."
+            "Drop A, B, or C in the comments below — we'll share how we code that exact module in MQL5."
         ),
         (
-            "QUANTITATIVE POLL: MANUAL VS. AUTOMATED EXECUTION ⚙️\n\n"
+            "QUANTITATIVE POLL: MANUAL VS. AUTOMATED EXECUTION\n\n"
             "What is the #1 reason your manual trades deviate from your backtested win rate?\n\n"
-            "1️⃣ Missing London/NY session setups while away from the desk\n"
-            "2️⃣ Closing winning runners at 1:1 R:R out of fear of pullback\n"
-            "3️⃣ Entering late after the impulse candle has already moved 30 pips\n\n"
+            "1) Missing London/NY session setups while away from the desk\n"
+            "2) Closing winning runners at 1:1 R:R out of fear of pullback\n"
+            "3) Entering late after the impulse candle has already moved 30 pips\n\n"
             "Reply with 1, 2, or 3 below. If you already have a mechanical rule set, DM us to scope a custom MT5 EA build."
         ),
         (
-            "MQL5 DEVELOPER DESK: OPEN Q&A 💻\n\n"
+            "MQL5 DEVELOPER DESK: OPEN Q&A\n\n"
             "Are you currently running an Expert Advisor (EA) or custom indicator that suffers from:\n"
-            "• OrderSend Error 130 / Invalid Stops during volatility?\n"
-            "• Late candle entries or repainting signals?\n"
-            "• Missing prop-firm news filter or equity protection?\n\n"
-            "Describe the bug in the comments or DM us your `.mq5` / strategy checklist—our engineering desk will diagnose the execution bottleneck."
+            "- OrderSend Error 130 / Invalid Stops during volatility?\n"
+            "- Late candle entries or repainting signals?\n"
+            "- Missing prop-firm news filter or equity protection?\n\n"
+            "Describe the bug in the comments or DM us your .mq5 / strategy checklist—our engineering desk will diagnose the execution bottleneck."
         )
     ]
     idx = get_next_rotation_index("discussion", len(discussions))
@@ -383,12 +453,20 @@ def generate_diagnostics_card(output_png="algoedge_post.png", caption_file="post
     width, height = 1080, 1080
     idx = get_next_rotation_index("diagnostics", 3)
 
-    img = np.full((height, width, 3), (16, 12, 10), dtype=np.uint8)
-    cv2.rectangle(img, (45, 45), (1035, 1035), (60, 180, 75), 2)
+    themes = [
+        {"accent": (80, 235, 100), "bg": (16, 12, 10), "header": "SPREAD & SLIPPAGE GUARD"},
+        {"accent": (245, 200, 35), "bg": (14, 16, 24), "header": "DYNAMIC RISK LOT CALCULATOR"},
+        {"accent": (60, 195, 255), "bg": (18, 12, 22), "header": "FAIR VALUE GAP (FVG) DETECTOR"}
+    ]
+    theme = themes[idx % len(themes)]
+    accent = theme["accent"]
 
-    cv2.putText(img, "ALGOEDGE SYSTEMS // TERMINAL DIAGNOSTICS LOG", (80, 110), cv2.FONT_HERSHEY_DUPLEX, 0.9, (80, 235, 100), 2, cv2.LINE_AA)
-    cv2.putText(img, f"VERIFIED MT5 TICK EXECUTION AUDIT | MODULE #{idx + 1}", (80, 155), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 180, 180), 1, cv2.LINE_AA)
-    cv2.line(img, (80, 180), (1000, 180), (60, 180, 75), 1)
+    img = np.full((height, width, 3), theme["bg"], dtype=np.uint8)
+    cv2.rectangle(img, (45, 45), (1035, 1035), accent, 3)
+
+    cv2.putText(img, f"ALGOEDGE // {theme['header']}", (80, 110), cv2.FONT_HERSHEY_DUPLEX, 0.92, accent, 2, cv2.LINE_AA)
+    cv2.putText(img, f"VERIFIED MT5 TICK EXECUTION AUDIT | MODULE #{idx + 1}", (80, 155), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (190, 195, 205), 1, cv2.LINE_AA)
+    cv2.line(img, (80, 180), (1000, 180), accent, 1)
 
     code_blocks = [
         [
@@ -405,10 +483,10 @@ def generate_diagnostics_card(output_png="algoedge_post.png", caption_file="post
         [
             "// MQL5 Dynamic Risk-Based Lot Calculator (Fixed 1.0% Risk)",
             "double CalculateExactLot(string sym, double riskPct, double slPts) {",
-            "   double equity = AccountInfoDouble(ACCOUNT_EQUITY);",
+            "   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);",
             "   double tickVal = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);",
-            "   double rawLot = (equity * (riskPct / 100.0)) / (slPts * tickVal);",
-            "   double step = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);",
+            "   double rawLot  = (equity * (riskPct / 100.0)) / (slPts * tickVal);",
+            "   double step    = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);",
             "   return(MathFloor(rawLot / step) * step);",
             "}"
         ],
@@ -424,10 +502,10 @@ def generate_diagnostics_card(output_png="algoedge_post.png", caption_file="post
     ]
     code_lines = code_blocks[idx % len(code_blocks)]
 
-    cv2.rectangle(img, (75, 215), (1005, 585), (26, 22, 18), -1)
-    cv2.rectangle(img, (75, 215), (1005, 585), (70, 70, 70), 1)
+    cv2.rectangle(img, (75, 215), (1005, 585), (26, 22, 20), -1)
+    cv2.rectangle(img, (75, 215), (1005, 585), (75, 75, 80), 1)
     for i, line in enumerate(code_lines):
-        color = (120, 180, 120) if line.startswith("//") else (230, 230, 240)
+        color = accent if line.startswith("//") else (235, 235, 245)
         cv2.putText(img, line, (100, 265 + i * 36), cv2.FONT_HERSHEY_SIMPLEX, 0.62, color, 1, cv2.LINE_AA)
 
     metrics = [
@@ -438,18 +516,19 @@ def generate_diagnostics_card(output_png="algoedge_post.png", caption_file="post
     ]
     for idx_m, (m_k, m_v) in enumerate(metrics):
         y = 650 + idx_m * 65
-        cv2.putText(img, m_k, (80, y), cv2.FONT_HERSHEY_DUPLEX, 0.72, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(img, m_k, (80, y), cv2.FONT_HERSHEY_DUPLEX, 0.72, accent, 2, cv2.LINE_AA)
         cv2.putText(img, m_v, (350, y), cv2.FONT_HERSHEY_SIMPLEX, 0.66, (230, 230, 230), 1, cv2.LINE_AA)
 
     cv2.rectangle(img, (75, 910), (1005, 1005), (30, 25, 20), -1)
+    cv2.rectangle(img, (75, 910), (1005, 1005), accent, 1)
     cv2.putText(img, "Comment 'CODE' or DM to audit your EA or build a custom MQL5 bot.", (105, 968), cv2.FONT_HERSHEY_DUPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
 
     caption = (
-        f"System Diagnostics (Module #{idx + 1}): How we engineer institutional reliability into MQL5 Expert Advisors.\n\n"
+        f"System Diagnostics (Module #{idx + 1} — {theme['header']}): How we engineer institutional reliability into MQL5 Expert Advisors.\n\n"
         "Before our engines ever call `OrderSend()`, the pre-execution filter validates:\n"
-        "✅ Real-time `SYMBOL_SPREAD` against your maximum point cap.\n"
-        "✅ Current floating + closed daily equity against your prop firm drawdown threshold.\n"
-        "✅ Exact tick-level invalidation distance for mathematical 1.0% lot calculation.\n\n"
+        "- Real-time `SYMBOL_SPREAD` against your maximum point cap.\n"
+        "- Current floating + closed daily equity against your prop firm drawdown threshold.\n"
+        "- Exact tick-level invalidation distance for mathematical 1.0% lot calculation.\n\n"
         "Comment 'CODE' or send a DM if you need an existing EA debugged or a custom strategy automated.\n\n"
         "#MQL5 #MetaTrader5 #AlgoTrading #QuantTrading #ForexPakistan #XAUUSD"
     )
@@ -466,7 +545,9 @@ if __name__ == "__main__":
     with open("active_mode.txt", "w", encoding="utf-8") as mf:
         mf.write(mode)
 
-    if mode == "reel":
+    if mode == "lead_magnet":
+        generate_lead_magnet_card("algoedge_post.png", "post_caption.txt")
+    elif mode == "reel":
         generate_dynamic_reel("algoedge_fvg_reel.mp4", "post_caption.txt")
     elif mode == "blueprint":
         generate_blueprint_infographic("algoedge_post.png", "post_caption.txt")

@@ -6,11 +6,9 @@ import subprocess
 import sys
 import requests
 
-# Google Drive Folder IDs for AlgoEdge Systems
-UPLOAD_FOLDER_ID = "17Qgq-26-H_D_ZEjjFN5hP0ckLsRCEVzt"  # AlgoEdge_Ready_For_Upload
+UPLOAD_FOLDER_ID = "17Qgq-26-H_D_ZEjjFN5hP0ckLsRCEVzt"   # AlgoEdge_Ready_For_Upload
 ARCHIVE_FOLDER_ID = "1UsGiLRSsekxLPMM5h0t0XHi8Ikx0IGBe"  # AlgoEdge_Archive
 
-# OAuth Credentials loaded securely from GitHub Actions Secrets (no hardcoded tokens)
 CLIENT_ID = os.environ.get("GCP_CLIENT_ID", "").strip()
 CLIENT_SECRET = os.environ.get("GCP_CLIENT_SECRET", "").strip()
 DRIVE_REFRESH_TOKEN = os.environ.get("DRIVE_REFRESH_TOKEN", "").strip()
@@ -21,6 +19,7 @@ INPUT_TOKEN = os.environ.get("META_PAGE_ACCESS_TOKEN", "").strip()
 
 RUN_LOGS = []
 
+
 def log(msg: str):
     ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     line = f"[{ts}] {msg}"
@@ -29,12 +28,8 @@ def log(msg: str):
 
 
 def get_drive_service():
-    """
-    Connects to Google Drive if GCP_CLIENT_ID, GCP_CLIENT_SECRET, and DRIVE_REFRESH_TOKEN are available.
-    Returns None gracefully if not configured so Meta publishing still proceeds without error.
-    """
     if not CLIENT_ID or not CLIENT_SECRET or not DRIVE_REFRESH_TOKEN:
-        log("Notice: Google Drive secrets (GCP_CLIENT_ID / GCP_CLIENT_SECRET / DRIVE_REFRESH_TOKEN) not set; running local repo scripts directly.")
+        log("Notice: Google Drive secrets not set; running local repo scripts directly.")
         return None
     try:
         from google.auth.transport.requests import Request
@@ -66,10 +61,6 @@ def download_drive_file_to_disk(drive_service, file_id: str, local_path: str):
 
 
 def move_drive_file_to_archive(drive_service, file_id: str, original_name: str):
-    """
-    Moves a picked-up code/config file from AlgoEdge_Ready_For_Upload (17Qgq-26-H_D_ZEjjFN5hP0ckLsRCEVzt)
-    into AlgoEdge_Archive (1UsGiLRSsekxLPMM5h0t0XHi8Ikx0IGBe) with a timestamped archive name.
-    """
     try:
         ts_str = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         base, ext = os.path.splitext(original_name)
@@ -89,25 +80,17 @@ def move_drive_file_to_archive(drive_service, file_id: str, original_name: str):
 
 
 def sync_staged_code_and_state_from_drive(drive_service) -> bool:
-    """
-    1. Downloads AlgoEdge_Queue_State.json from AlgoEdge_Archive so rotation never repeats.
-    2. Checks AlgoEdge_Ready_For_Upload for any updated .py or .yml files placed by Spark.
-    3. Downloads them to overwrite local repo files and moves the staged Drive files into AlgoEdge_Archive!
-    Returns True if any .py script was updated from Drive.
-    """
     if not drive_service:
         return False
 
     updated_any_script = False
     try:
-        # Pull rotation queue state from Archive
         q_state = f"'{ARCHIVE_FOLDER_ID}' in parents and name = 'AlgoEdge_Queue_State.json' and trashed = false"
         state_files = drive_service.files().list(q=q_state, fields="files(id, name)", orderBy="modifiedTime desc").execute().get("files", [])
         if state_files:
             download_drive_file_to_disk(drive_service, state_files[0]["id"], "AlgoEdge_Queue_State.json")
             log("[+] Restored rotation queue state from AlgoEdge_Archive.")
 
-        # Check Ready_For_Upload for any staged code updates
         q_ready = f"'{UPLOAD_FOLDER_ID}' in parents and trashed = false"
         staged_files = drive_service.files().list(q=q_ready, fields="files(id, name, mimeType)", orderBy="modifiedTime asc").execute().get("files", [])
 
@@ -130,17 +113,88 @@ def sync_staged_code_and_state_from_drive(drive_service) -> bool:
     return updated_any_script
 
 
+def deduplicate_page_posts(page_id: str, page_token: str) -> int:
+    """
+    Scans up to 50 recent published posts on the Page, keeps ONLY the newest post
+    of each unique message signature, and deletes all older duplicate posts via Graph API.
+    """
+    deleted_count = 0
+    try:
+        res = requests.get(
+            f"https://graph.facebook.com/v21.0/{page_id}/published_posts",
+            params={"fields": "id,message,created_time", "limit": 50, "access_token": page_token}
+        ).json()
+        posts = res.get("data", [])
+        seen_signatures = set()
+        for post in posts:
+            pid = post.get("id")
+            msg = (post.get("message") or "").strip()
+            if not msg:
+                continue
+            sig = msg[:70].lower()
+            if sig in seen_signatures:
+                del_res = requests.delete(
+                    f"https://graph.facebook.com/v21.0/{pid}",
+                    params={"access_token": page_token}
+                )
+                if del_res.status_code == 200:
+                    deleted_count += 1
+                    log(f"[CLEANUP] Deleted duplicate post {pid} ('{msg[:35]}...')")
+                else:
+                    log(f"[CLEANUP] Could not delete {pid}: {del_res.text}")
+            else:
+                seen_signatures.add(sig)
+    except Exception as e:
+        log(f"Notice during Page deduplication: {e}")
+    return deleted_count
+
+
+def ensure_pinned_lead_magnet_published(page_id: str, page_token: str):
+    """
+    Publishes the dedicated 'FREE MT5 PROP FIRM DRAWDOWN GUARD & LOT CALCULATOR (.EX5)'
+    Lead-Magnet post once (if not already present in AlgoEdge_Queue_State.json) and logs its Post ID.
+    """
+    state_file = "AlgoEdge_Queue_State.json"
+    state = {}
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except Exception:
+            state = {}
+
+    if state.get("leadMagnetPublished"):
+        return
+
+    log("[*] Publishing dedicated Pinned Lead-Magnet post (Free MT5 Prop Drawdown Guard .ex5)...")
+    subprocess.run([sys.executable, "render_algo_reel.py", "lead_magnet"], check=False)
+    caption = ""
+    if os.path.exists("post_caption.txt"):
+        with open("post_caption.txt", "r", encoding="utf-8") as cf:
+            caption = cf.read().strip()
+
+    if os.path.exists("algoedge_post.png") and caption:
+        url = f"https://graph.facebook.com/v21.0/{page_id}/photos"
+        with open("algoedge_post.png", "rb") as f:
+            res = requests.post(url, data={"message": caption, "access_token": page_token}, files={"source": f}).json()
+        if "id" in res:
+            post_id = res.get("post_id") or res.get("id")
+            log(f"[PIN_THIS_POST] Lead-Magnet Post Published! Post ID: {post_id} | Photo URL: https://www.facebook.com/photo/?fbid={res['id']}")
+            state["leadMagnetPublished"] = True
+            state["leadMagnetPostId"] = str(post_id)
+            state["leadMagnetPhotoUrl"] = f"https://www.facebook.com/photo/?fbid={res['id']}"
+            with open(state_file, "w", encoding="utf-8") as sf:
+                json.dump(state, sf, indent=2)
+        else:
+            log(f"[!] Lead-Magnet upload returned: {res}")
+
+
 def save_state_and_telemetry_to_drive(drive_service, page_id: str, page_token: str, replies_sent: int):
-    """
-    Uploads updated AlgoEdge_Queue_State.json, AlgoEdge_Page_Report.json, and AlgoEdge_Last_Run_Log.txt
-    into AlgoEdge_Archive so Spark can audit real-time follower growth and engagement every morning!
-    """
     if not drive_service:
         return
     try:
         from googleapiclient.http import MediaFileUpload
 
-        # 1. Save Queue State
         if os.path.exists("AlgoEdge_Queue_State.json"):
             q_s = f"'{ARCHIVE_FOLDER_ID}' in parents and name = 'AlgoEdge_Queue_State.json' and trashed = false"
             ex_s = drive_service.files().list(q=q_s, fields="files(id)").execute().get("files", [])
@@ -150,10 +204,9 @@ def save_state_and_telemetry_to_drive(drive_service, page_id: str, page_token: s
             else:
                 drive_service.files().create(body={"name": "AlgoEdge_Queue_State.json", "parents": [ARCHIVE_FOLDER_ID]}, media_body=media_s).execute()
 
-        # 2. Query Meta Graph API for live Page Followers & Recent Post Metrics
         page_info_url = f"https://graph.facebook.com/v21.0/{page_id}"
         p_res = requests.get(page_info_url, params={"fields": "id,name,followers_count,fan_count", "access_token": page_token}).json()
-        posts_res = requests.get(f"https://graph.facebook.com/v21.0/{page_id}/published_posts", params={"fields": "id,message,created_time,shares,likes.summary(true),comments.summary(true)", "limit": 10, "access_token": page_token}).json()
+        posts_res = requests.get(f"https://graph.facebook.com/v21.0/{page_id}/published_posts", params={"fields": "id,message,created_time,shares,likes.summary(true),comments.summary(true)", "limit": 15, "access_token": page_token}).json()
 
         report_data = {
             "generatedAtUtc": datetime.datetime.utcnow().isoformat() + "Z",
@@ -175,7 +228,6 @@ def save_state_and_telemetry_to_drive(drive_service, page_id: str, page_token: s
         else:
             drive_service.files().create(body={"name": "AlgoEdge_Page_Report.json", "parents": [ARCHIVE_FOLDER_ID]}, media_body=media_r).execute()
 
-        # 3. Save Run Log
         with open("AlgoEdge_Last_Run_Log.txt", "w", encoding="utf-8") as lf:
             lf.write("\n".join(RUN_LOGS) + "\n")
         q_l = f"'{ARCHIVE_FOLDER_ID}' in parents and name = 'AlgoEdge_Last_Run_Log.txt' and trashed = false"
@@ -208,130 +260,86 @@ def resolve_page_credentials(token, target_id):
                 if str(page.get("id")) == str(target_id):
                     return str(page.get("id")), page.get("access_token")
             first_page = data["data"][0]
-            true_id = str(first_page.get("id"))
-            page_token = first_page.get("access_token")
-            log(f"[+] Using Page '{first_page.get('name')}' with true Page ID: {true_id}")
-            return true_id, page_token
+            return str(first_page.get("id")), first_page.get("access_token")
     except Exception as e:
         log(f"[*] Note: Could not query /me/accounts ({e})")
-    
     return target_id, token
 
 
 def publish_video_direct(page_id, page_token, video_path, caption):
-    log(f"[*] Publishing video directly to https://graph-video.facebook.com/v21.0/{page_id}/videos...")
     upload_url = f"https://graph-video.facebook.com/v21.0/{page_id}/videos"
     with open(video_path, "rb") as f:
-        files = {"source": f}
-        data = {"description": caption, "access_token": page_token}
-        res = requests.post(upload_url, data=data, files=files)
-        res_data = res.json()
-    if "id" in res_data:
-        log(f"[SUCCESS] Video published to Facebook Page! Video ID: {res_data['id']}")
+        res = requests.post(upload_url, data={"description": caption, "access_token": page_token}, files={"source": f}).json()
+    if "id" in res:
+        log(f"[SUCCESS] Video published! Video ID: {res['id']}")
         return True
-    else:
-        log(f"Direct video upload failed: {res_data}")
-        return False
+    log(f"Direct video upload failed: {res}")
+    return False
 
 
 def publish_facebook_reel(page_id, page_token, video_path, caption):
-    log(f"[*] Initializing Reel upload session for Page: {page_id}...")
     init_url = f"https://graph.facebook.com/v21.0/{page_id}/video_reels"
-    init_payload = {"upload_phase": "start", "access_token": page_token}
-    res = requests.post(init_url, data=init_payload)
-    data = res.json()
-
+    data = requests.post(init_url, data={"upload_phase": "start", "access_token": page_token}).json()
     if "video_id" not in data:
-        log(f"Reel API response: {data}")
-        log("[*] Falling back to direct video publishing endpoint...")
         return publish_video_direct(page_id, page_token, video_path, caption)
 
     video_id = data["video_id"]
     upload_url = data["upload_url"]
     file_size = os.path.getsize(video_path)
-    headers = {
-        "Authorization": f"OAuth {page_token}",
-        "offset": "0",
-        "file_size": str(file_size)
-    }
+    headers = {"Authorization": f"OAuth {page_token}", "offset": "0", "file_size": str(file_size)}
     with open(video_path, "rb") as f:
         requests.post(upload_url, headers=headers, data=f)
 
-    finish_payload = {
+    finish_res = requests.post(init_url, data={
         "upload_phase": "finish",
         "access_token": page_token,
         "video_id": video_id,
         "video_state": "PUBLISHED",
         "description": caption
-    }
-    finish_res = requests.post(init_url, data=finish_payload)
-    finish_data = finish_res.json()
-    if finish_data.get("success"):
-        log(f"[SUCCESS] Reel published to Facebook Page! Video ID: {video_id}")
+    }).json()
+    if finish_res.get("success"):
+        log(f"[SUCCESS] Reel published! Video ID: {video_id}")
         return True
-    else:
-        return publish_video_direct(page_id, page_token, video_path, caption)
+    return publish_video_direct(page_id, page_token, video_path, caption)
 
 
 def publish_photo_post(page_id, page_token, image_path, caption):
-    log(f"[*] Publishing high-resolution graphic '{image_path}' to Page feed...")
     url = f"https://graph.facebook.com/v21.0/{page_id}/photos"
     with open(image_path, "rb") as f:
-        files = {"source": f}
-        data = {"message": caption, "access_token": page_token}
-        res = requests.post(url, data=data, files=files)
-        res_data = res.json()
-    if "id" in res_data:
-        log(f"[SUCCESS] Photo post published! Post ID: {res_data['id']}")
+        res = requests.post(url, data={"message": caption, "access_token": page_token}, files={"source": f}).json()
+    if "id" in res:
+        log(f"[SUCCESS] Photo post published! Post ID: {res['id']}")
         return True
-    else:
-        log(f"[!] Photo upload failed: {res_data}")
-        return False
+    log(f"[!] Photo upload failed: {res}")
+    return False
 
 
 def publish_text_discussion(page_id, page_token, message_text):
-    log("[*] Publishing Trader Open Floor discussion post to Page feed...")
     url = f"https://graph.facebook.com/v21.0/{page_id}/feed"
-    data = {"message": message_text, "access_token": page_token}
-    res = requests.post(url, data=data)
-    res_data = res.json()
-    if "id" in res_data:
-        log(f"[SUCCESS] Discussion post published! Post ID: {res_data['id']}")
+    res = requests.post(url, data={"message": message_text, "access_token": page_token}).json()
+    if "id" in res:
+        log(f"[SUCCESS] Discussion post published! Post ID: {res['id']}")
         return True
-    else:
-        log(f"[!] Discussion post failed: {res_data}")
-        return False
+    log(f"[!] Discussion post failed: {res}")
+    return False
 
 
 def run_comment_auto_responder(page_id, page_token) -> int:
-    log("[*] Running Inbound Comment Auto-Responder across recent Page posts...")
     url = f"https://graph.facebook.com/v21.0/{page_id}/published_posts"
-    params = {
-        "fields": "id,comments{id,message,from,comments{from}}",
-        "limit": 10,
-        "access_token": page_token
-    }
+    params = {"fields": "id,comments{id,message,from,comments{from}}", "limit": 10, "access_token": page_token}
     replies_sent = 0
     try:
-        res = requests.get(url, params=params)
-        data = res.json()
-        posts = data.get("data", [])
-
+        posts = requests.get(url, params=params).json().get("data", [])
         for post in posts:
-            comments_block = post.get("comments", {}).get("data", [])
-            for comment in comments_block:
+            for comment in post.get("comments", {}).get("data", []):
                 c_id = comment.get("id")
                 c_msg = (comment.get("message") or "").strip()
                 c_upper = c_msg.upper()
-                from_info = comment.get("from", {})
-                if str(from_info.get("id")) == str(page_id):
+                if str(comment.get("from", {}).get("id")) == str(page_id):
                     continue
-
                 sub_comments = comment.get("comments", {}).get("data", [])
-                already_replied = any(str(sc.get("from", {}).get("id")) == str(page_id) for sc in sub_comments)
-                if already_replied:
+                if any(str(sc.get("from", {}).get("id")) == str(page_id) for sc in sub_comments):
                     continue
-
                 if any(k in c_upper for k in ["RISK", "GUARD", "LOT"]):
                     reply_text = (
                         "Thanks for reaching out! Our MT5 Risk & Prop Drawdown Guard (.ex5) is ready for your terminal. "
@@ -347,27 +355,22 @@ def run_comment_auto_responder(page_id, page_token) -> int:
                         "Appreciate the feedback! Mechanical execution and strict drawdown protection are the core of what we build at AlgoEdge Systems. "
                         "Feel free to DM our desk anytime if you want to test our turnkey EAs or automate your own strategy rules."
                     )
-
-                reply_url = f"https://graph.facebook.com/v21.0/{c_id}/comments"
-                rep_res = requests.post(reply_url, data={"message": reply_text, "access_token": page_token})
+                rep_res = requests.post(f"https://graph.facebook.com/v21.0/{c_id}/comments", data={"message": reply_text, "access_token": page_token})
                 if rep_res.status_code == 200:
                     replies_sent += 1
-                    log(f"[+] Auto-replied to comment {c_id}: '{c_msg[:30]}...'")
-
-        log(f"[+] Comment Auto-Responder complete. New replies sent: {replies_sent}")
+                    log(f"[+] Auto-replied to comment {c_id}")
     except Exception as e:
-        log(f"[*] Note: Comment Auto-Responder check completed with notice: {e}")
+        log(f"[*] Note: Comment Auto-Responder notice: {e}")
     return replies_sent
 
 
 if __name__ == "__main__":
     drive_service = get_drive_service()
 
-    # Step 1: Sync any staged code updates from AlgoEdge_Ready_For_Upload & move them to AlgoEdge_Archive
     if "--synced" not in sys.argv and drive_service is not None:
         scripts_updated = sync_staged_code_and_state_from_drive(drive_service)
         if scripts_updated:
-            log("[*] Staged scripts pulled from Google Drive! Re-running render_algo_reel.py and publish_to_meta.py with new code...")
+            log("[*] Staged scripts pulled from Google Drive! Re-running with new code...")
             subprocess.run([sys.executable, "render_algo_reel.py"], check=False)
             res = subprocess.run([sys.executable, "publish_to_meta.py", "--synced"])
             sys.exit(res.returncode)
@@ -378,7 +381,14 @@ if __name__ == "__main__":
 
     true_page_id, page_token = resolve_page_credentials(INPUT_TOKEN, INPUT_PAGE_ID)
 
-    # Ensure content is rendered if not yet generated in this run
+    # 1. Clean up duplicate posts on the Page
+    dedup_count = deduplicate_page_posts(true_page_id, page_token)
+    log(f"[*] Deduplication check complete. Duplicate posts removed: {dedup_count}")
+
+    # 2. Ensure the dedicated Pinned Lead-Magnet post is published once
+    ensure_pinned_lead_magnet_published(true_page_id, page_token)
+
+    # 3. Publish today's scheduled/rotated content pillar
     if not os.path.exists("active_mode.txt"):
         subprocess.run([sys.executable, "render_algo_reel.py"], check=False)
 
@@ -397,7 +407,7 @@ if __name__ == "__main__":
     published_ok = False
     if mode == "reel":
         published_ok = publish_facebook_reel(true_page_id, page_token, "algoedge_fvg_reel.mp4", caption)
-    elif mode in ["blueprint", "diagnostics"]:
+    elif mode in ["blueprint", "diagnostics", "lead_magnet"]:
         published_ok = publish_photo_post(true_page_id, page_token, "algoedge_post.png", caption)
     elif mode == "discussion":
         published_ok = publish_text_discussion(true_page_id, page_token, caption)
